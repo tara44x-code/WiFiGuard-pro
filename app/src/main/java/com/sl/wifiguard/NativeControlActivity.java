@@ -39,6 +39,8 @@ public class NativeControlActivity extends BaseActivity {
     private JSONArray table = new JSONArray();
     private LinearLayout list;
     private TextView status;
+    private RouterIcon icon;
+    private boolean remote;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -52,33 +54,69 @@ public class NativeControlActivity extends BaseActivity {
         }
         driver = new TendaDriver(profile.url(remote));
 
+        this.remote = remote;
         LinearLayout root = Ui.column(this);
         root.setBackgroundColor(Ui.BG);
         root.setFitsSystemWindows(true);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        int p = Ui.dp(this, 16);
-        root.setPadding(p, p, p, 0);
-        root.addView(Ui.text(this, "تحكم مباشر • " + profile.name, 20, Ui.WHITE, true));
-        status = Ui.text(this, "", 12, Ui.MUTED, false);
-        root.addView(status, Ui.top(this, 4));
-        LinearLayout bar = Ui.row(this);
-        bar.addView(Ui.button(this, "تحديث ↻", Ui.CYAN, v -> load()), Ui.weight(this, 3));
-        bar.addView(Ui.button(this, "إعادة تشغيل الراوتر", Ui.RED, v -> confirmReboot()), Ui.weight(this, 3));
-        root.addView(bar, Ui.top(this, 10));
-        TextView warn = Ui.text(this, "ميزة تجريبية لراوترات Tenda (سلسلة AC). تأكد من النتيجة من لوحة الراوتر بعد أول تغيير.",
-                12, Ui.GOLD, false);
-        root.addView(warn, Ui.top(this, 8));
-
         ScrollView scroll = new ScrollView(this);
-        list = Ui.column(this);
-        list.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 16));
-        scroll.addView(list);
+        LinearLayout page = Ui.column(this);
+        int p = Ui.dp(this, 16);
+        page.setPadding(p, p, p, p);
+        scroll.addView(page);
         root.addView(scroll, new LinearLayout.LayoutParams(Ui.MATCH, 0, 1f));
+
+        // بطاقة الراوتر
+        LinearLayout hero = Ui.card(this);
+        LinearLayout top = Ui.row(this);
+        icon = new RouterIcon(this);
+        top.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 84), Ui.dp(this, 60)));
+        LinearLayout titles = Ui.column(this);
+        titles.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 12), 0);
+        titles.addView(Ui.text(this, profile.name, 20, Ui.WHITE, true));
+        titles.addView(Ui.text(this, "Tenda  •  " + (remote ? "عن بعد" : "محلي"), 12, Ui.MUTED, false));
+        top.addView(titles, new LinearLayout.LayoutParams(0, Ui.WRAP, 1f));
+        TextView close = Ui.text(this, "✕", 20, Ui.MUTED, true);
+        close.setPadding(Ui.dp(this, 8), Ui.dp(this, 4), Ui.dp(this, 8), Ui.dp(this, 4));
+        close.setOnClickListener(v -> finish());
+        top.addView(close);
+        hero.addView(top);
+        status = Ui.text(this, "", 13, Ui.MUTED, false);
+        hero.addView(status, Ui.top(this, 10));
+        page.addView(hero);
+
+        // أزرار سريعة
+        String[] labels = {"تحديث ↻", "إعادة تشغيل", "باسورد الواي فاي", "حظر جهاز", "التحكم من بعيد", "لوحة الراوتر"};
+        int[] colors = {Ui.CYAN, Ui.RED, Ui.BLUE, Ui.GOLD, Ui.GREEN, Ui.MUTED};
+        for (int i = 0; i < labels.length; i += 2) {
+            LinearLayout r = Ui.row(this);
+            for (int k = i; k < i + 2; k++) {
+                final int idx = k;
+                TextView tile = Ui.button(this, labels[k], colors[k], v -> action(idx));
+                tile.setPadding(0, Ui.dp(this, 16), 0, Ui.dp(this, 16));
+                r.addView(tile, Ui.weight(this, 4));
+            }
+            page.addView(r, Ui.top(this, i == 0 ? 0 : 8));
+        }
+
+        LinearLayout head = Ui.row(this);
+        head.addView(Ui.text(this, "الأجهزة المتصلة", 17, Ui.WHITE, true), new LinearLayout.LayoutParams(0, Ui.WRAP, 1f));
+        TextView diag = Ui.text(this, "تقرير تشخيص", 12, Ui.MUTED, false);
+        diag.setOnClickListener(v -> diagnostics());
+        head.addView(diag);
+        page.addView(head, Ui.top(this, 18));
+
+        list = Ui.column(this);
+        list.setPadding(0, Ui.dp(this, 10), 0, 0);
+        page.addView(list);
+        page.addView(Ui.text(this, "التحكم المباشر تجريبي. إذا زر ما اشتغل، دز «تقرير تشخيص» للمطور.", 12, Ui.MUTED, false),
+                Ui.top(this, 8));
         setContentView(root);
         load();
     }
 
     private void load() {
+        status.setTextColor(Ui.MUTED);
         status.setText("جاري الاتصال بالراوتر…");
         io.execute(() -> {
             try {
@@ -86,12 +124,71 @@ public class NativeControlActivity extends BaseActivity {
                     throw new Exception("فشل تسجيل الدخول. تأكد من كلمة المرور أو استعمل لوحة الراوتر.");
                 }
                 final JSONArray t = driver.netControl();
-                ui.post(() -> render(t));
+                ui.post(() -> {
+                    icon.setOnline(true);
+                    render(t);
+                });
             } catch (final Exception e) {
                 ui.post(() -> {
-                    if (!isFinishing()) status.setText("تعذّر التحكم المباشر: " + e.getMessage());
+                    if (isFinishing()) return;
+                    icon.setOnline(false);
+                    status.setTextColor(Ui.RED);
+                    status.setText("تعذّر الاتصال: " + e.getMessage());
+                    list.removeAllViews();
+                    LinearLayout c = Ui.card(this);
+                    c.addView(Ui.text(this, "ما كدرت أقرا الأجهزة من الراوتر.", 14, Ui.WHITE, true));
+                    c.addView(Ui.text(this, "جرّب «لوحة الراوتر»، ودز «تقرير تشخيص» للمطور حتى يضبط راوترك.",
+                            13, Ui.MUTED, false), Ui.top(this, 4));
+                    list.addView(c);
                 });
             }
+        });
+    }
+
+    private void action(int idx) {
+        switch (idx) {
+            case 0: load(); break;
+            case 1: confirmReboot(); break;
+            case 2: web("Wireless / WiFi Settings ← غيّر WiFi Password واحفظ. انتبه: كل الأجهزة راح تنفصل وترجع تتصل بالباسورد الجديد."); break;
+            case 3: web("Advanced ← MAC Filter أو Blacklist: ضيف الجهاز للقائمة السوداء. تكدر تستعمل «الرقابة» من بطاقة الجهاز هم."); break;
+            case 4: web("Advanced / Administration ← Remote Web Management: فعّلها وخلي المنفذ 8080. فحص التحكم من بعيد موجود بقائمة ⋮ بشاشة الراوترات."); break;
+            default: web(null);
+        }
+    }
+
+    private void web(String hint) {
+        startActivity(new android.content.Intent(this, RouterActivity.class)
+                .putExtra(RouterActivity.EXTRA_ID, profile.id)
+                .putExtra(RouterActivity.EXTRA_REMOTE, remote)
+                .putExtra(RouterActivity.EXTRA_HINT, hint));
+    }
+
+    /** قراءة فقط: يجمع ردود الراوتر الخام بدون كلمة المرور حتى نعرف شكل واجهة هذا الموديل. */
+    private void diagnostics() {
+        status.setText("جاري تجهيز التقرير…");
+        io.execute(() -> {
+            StringBuilder sb = new StringBuilder("WiFi Guard • تقرير تشخيص Tenda\n");
+            sb.append("Android ").append(android.os.Build.VERSION.SDK_INT).append(" • ")
+                    .append(remote ? "remote" : "local").append("\n\n");
+            try {
+                sb.append("[login] ").append(driver.login(profile.username, profile.password) ? "OK" : "FAIL")
+                        .append("\n").append(driver.lastLogin).append("\n\n");
+            } catch (Exception e) {
+                sb.append("[login] خطأ: ").append(e.getMessage()).append("\n\n");
+            }
+            String[] paths = {"/goform/GetNetControlList", "/goform/getOnlineList",
+                    "/goform/getStatus?modules=internetStatus,wanBasicCfg,remoteWeb,systemInfo,softWare",
+                    "/goform/GetParentControlInfo?mac=00:00:00:00:00:00"};
+            for (String path : paths) sb.append('[').append(path).append("]\n").append(driver.probe(path)).append("\n\n");
+            final String report = sb.toString();
+            ui.post(() -> {
+                if (isFinishing()) return;
+                status.setText("");
+                android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                i.setType("text/plain");
+                i.putExtra(android.content.Intent.EXTRA_TEXT, report);
+                startActivity(android.content.Intent.createChooser(i, "إرسال تقرير التشخيص"));
+            });
         });
     }
 

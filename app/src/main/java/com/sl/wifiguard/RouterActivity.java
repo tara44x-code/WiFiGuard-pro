@@ -28,6 +28,8 @@ import org.json.JSONObject;
 public class RouterActivity extends BaseActivity {
     static final String EXTRA_ID = "id";
     static final String EXTRA_REMOTE = "remote";
+    /** شرح قصير يظهر فوق الصفحة: وين يدوس المستخدم لهذه المهمة. */
+    static final String EXTRA_HINT = "hint";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private RouterProfile profile;
@@ -70,6 +72,15 @@ public class RouterActivity extends BaseActivity {
         bar.addView(Ui.button(this, "أدوات", Ui.BLUE, v -> tools()), Ui.weight(this, 3));
         bar.addView(Ui.button(this, "✕", Ui.RED, v -> finish()), Ui.weight(this, 3));
         head.addView(bar, Ui.top(this, 8));
+        String hint = getIntent().getStringExtra(EXTRA_HINT);
+        if (hint != null && !hint.isEmpty()) {
+            final TextView h = Ui.text(this, hint + "   ✕", 13, Ui.GOLD, false);
+            int hp = Ui.dp(this, 10);
+            h.setPadding(hp, hp, hp, hp);
+            h.setBackground(Ui.shape(this, 0x22FBBF24, Ui.GOLD, 12));
+            h.setOnClickListener(v -> h.setVisibility(View.GONE));
+            head.addView(h, Ui.top(this, 8));
+        }
         root.addView(head);
 
         web = new WebView(this);

@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -32,7 +33,11 @@ import org.json.JSONObject;
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** الشاشة الرئيسية: الرئيسية، الشبكات، الراوترات، الأجهزة، الإعدادات. */
 public class MainActivity extends BaseActivity {
@@ -120,6 +125,7 @@ public class MainActivity extends BaseActivity {
     protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
         if (discovery != null) discovery.cancel();
+        checker.shutdownNow();
         super.onDestroy();
     }
 
@@ -391,42 +397,346 @@ public class MainActivity extends BaseActivity {
 
     // ---------------------------------------------------------------- الراوترات
 
+    /** حالة كل راوتر: {محلي، عن بعد} بقيم RouterStatus. */
+    private final Map<String, int[]> routerState = new HashMap<>();
+    private final ExecutorService checker = Executors.newSingleThreadExecutor();
+    private long lastCheck;
+    private boolean checking, detecting;
+    private String detectedGateway = "", detectedVendor = "generic";
+
     private void routers() {
-        heading("الراوترات", "راوتراتك المحفوظة — البيانات مشفّرة على هذا الهاتف فقط");
-        List<RouterProfile> list = Vault.routers(this);
+        heading("الراوترات", "اضغط على الراوتر لفتحه — البيانات مشفّرة على هذا الهاتف فقط");
+        final List<RouterProfile> list = Vault.routers(this);
+        final NetworkEngine.Snapshot s = NetworkEngine.snapshot(this);
+
+        boolean gatewaySaved = false;
+        for (RouterProfile p : list) {
+            if (s.gateway.equals(Uri.parse(p.localUrl).getHost())) gatewaySaved = true;
+        }
+        if (s.connected && !s.gateway.isEmpty() && !gatewaySaved) detectBanner(s.gateway);
+
         if (list.isEmpty()) {
-            info(card("لا يوجد راوتر محفوظ"), "أضف راوترك مرة واحدة مع اسم المستخدم وكلمة المرور، وبعدها تفتح لوحته بضغطة ويدخل التطبيق تلقائياً.");
+            info(card("لا يوجد راوتر محفوظ"), "أضف راوترك مرة وحدة ويه كلمة المرور، وبعدها تفتحه بضغطة ويدخل التطبيق تلقائياً.");
         }
-        for (final RouterProfile p : list) {
-            LinearLayout c = card(null);
-            c.addView(Ui.text(this, p.name, 17, Ui.WHITE, true));
-            c.addView(Ui.text(this, RouterDetect.name(p.vendor) + "  •  " + p.localUrl, 12, Ui.MUTED, false), Ui.top(this, 2));
-            if (!p.remoteUrl.isEmpty()) {
-                c.addView(Ui.text(this, "عن بعد: " + p.remoteUrl, 12, Ui.MUTED, false));
+        LinearLayout row = null;
+        for (int i = 0; i < list.size(); i++) {
+            if (i % 2 == 0) {
+                row = Ui.row(this);
+                row.setGravity(Gravity.TOP);
+                content.addView(row, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
             }
-            LinearLayout r = Ui.row(this);
-            r.addView(Ui.button(this, "محلي", Ui.CYAN, v -> openRouter(p, false)), Ui.weight(this, 3));
-            if (!p.remoteUrl.isEmpty()) {
-                r.addView(Ui.button(this, "عن بعد", Ui.GREEN, v -> openRouter(p, true)), Ui.weight(this, 3));
-            }
-            r.addView(Ui.button(this, "تعديل", Ui.MUTED, v -> editRouter(p, null)), Ui.weight(this, 3));
-            r.addView(Ui.button(this, "حذف", Ui.RED, v -> confirmDelete(p)), Ui.weight(this, 3));
-            c.addView(r, Ui.top(this, 10));
+            row.addView(routerCard(list.get(i)), cardParams());
         }
-        final String gw = NetworkEngine.snapshot(this).gateway;
-        btn(content, "إضافة راوتر  +", Ui.GREEN, v -> editRouter(null, gw.isEmpty() ? null : "http://" + gw));
+        if (row != null && list.size() % 2 == 1) row.addView(new View(this), cardParams());
+
+        LinearLayout bar = Ui.row(this);
+        final String gw = s.gateway;
+        bar.addView(Ui.button(this, "إضافة راوتر  +", Ui.GREEN,
+                v -> editRouter(null, gw.isEmpty() ? null : "http://" + gw, "auto")), Ui.weight(this, 4));
+        bar.addView(Ui.button(this, checking ? "جاري الفحص…" : "فحص الحالة ↻", Ui.CYAN,
+                v -> checkAll()), Ui.weight(this, 4));
+        content.addView(bar, Ui.top(this, 4));
+
         LinearLayout h = card("التحكم من بعيد");
-        LinearLayout.LayoutParams lp = Ui.top(this, 14);
-        lp.bottomMargin = Ui.dp(this, 12);
-        h.setLayoutParams(lp);
-        info(h, "يشتغل فقط إذا فعّلت في الراوتر Remote Management أو DDNS أو VPN، واكتب عنوانه في خانة «عنوان التحكم من بعيد». "
-                + "الأفضل أمنياً: VPN أو https، ولا تترك كلمة المرور الافتراضية admin إذا كانت اللوحة مفتوحة على الإنترنت.");
+        ((LinearLayout.LayoutParams) h.getLayoutParams()).topMargin = Ui.dp(this, 14);
+        info(h, "فعّل «تحكم من بعيد» بالبطاقة حتى توصل لراوترك من أي مكان. يشتغل بس إذا عند راوترك عنوان عام من شركة الإنترنت "
+                + "وفعّلت Remote Management بالراوتر. التطبيق يفحص هذا إلك لراوترات Tenda.");
+
+        if (System.currentTimeMillis() - lastCheck > 15000) checkAll();
     }
 
-    private void openRouter(RouterProfile p, boolean remote) {
-        startActivity(new Intent(this, RouterActivity.class)
+    private LinearLayout.LayoutParams cardParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.WRAP, 1f);
+        lp.leftMargin = Ui.dp(this, 5);
+        lp.rightMargin = Ui.dp(this, 5);
+        lp.bottomMargin = Ui.dp(this, 10);
+        return lp;
+    }
+
+    private View routerCard(final RouterProfile p) {
+        int[] st = routerState.get(p.id);
+        final int local = st == null ? RouterStatus.UNKNOWN : st[0];
+        final int remote = st == null ? RouterStatus.UNKNOWN : st[1];
+        boolean known = st != null;
+        boolean online = local == RouterStatus.ONLINE || remote == RouterStatus.ONLINE;
+
+        LinearLayout c = Ui.card(this);
+        LinearLayout top = Ui.row(this);
+        RouterIcon icon = new RouterIcon(this);
+        icon.setOnline(online || !known);
+        top.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 72), Ui.dp(this, 52)));
+        top.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        TextView menu = Ui.text(this, "⋮", 22, Ui.MUTED, true);
+        menu.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), Ui.dp(this, 8));
+        menu.setOnClickListener(v -> routerMenu(p));
+        top.addView(menu);
+        c.addView(top);
+
+        TextView name = Ui.text(this, p.name, 17, Ui.WHITE, true);
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        c.addView(name, Ui.top(this, 8));
+        c.addView(Ui.text(this, RouterDetect.name(p.vendor), 12, Ui.MUTED, false));
+
+        String label;
+        int color;
+        if (!known) {
+            label = "جاري الفحص…";
+            color = Ui.MUTED;
+        } else if (local == RouterStatus.ONLINE) {
+            label = "متصل";
+            color = Ui.GREEN;
+        } else if (remote == RouterStatus.ONLINE) {
+            label = "متصل عن بعد";
+            color = Ui.CYAN;
+        } else {
+            label = "غير متصل";
+            color = Ui.RED;
+        }
+        TextView badge = Ui.text(this, label, 12, color, true);
+        int bp = Ui.dp(this, 6);
+        badge.setPadding(bp * 2, bp / 2, bp * 2, bp / 2);
+        badge.setBackground(Ui.shape(this, (color & 0x00FFFFFF) | 0x22000000, 0, 8));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP);
+        blp.topMargin = Ui.dp(this, 6);
+        c.addView(badge, blp);
+
+        final Switch sw = new Switch(this);
+        sw.setText("تحكم من بعيد");
+        sw.setTextColor(Ui.WHITE);
+        sw.setTextSize(13);
+        sw.setChecked(p.remoteEnabled && !p.remoteUrl.isEmpty());
+        sw.setOnClickListener(v -> {
+            if (sw.isChecked() && p.remoteUrl.isEmpty()) {
+                sw.setChecked(false);
+                remoteSetup(p);
+                return;
+            }
+            p.remoteEnabled = sw.isChecked();
+            saveQuietly(p);
+            checkAll();
+        });
+        c.addView(sw, Ui.top(this, 8));
+
+        c.setAlpha(known && !online ? 0.45f : 1f);
+        c.setOnClickListener(v -> openSmart(p, local, remote));
+        return c;
+    }
+
+    private void saveQuietly(RouterProfile p) {
+        try {
+            Vault.put(this, p);
+        } catch (Exception e) {
+            Ui.toast(this, "تعذّر الحفظ");
+        }
+    }
+
+    /** يفحص كل الراوترات بالخلفية ثم يعيد رسم الصفحة. */
+    private void checkAll() {
+        if (checking) return;
+        checking = true;
+        lastCheck = System.currentTimeMillis();
+        final List<RouterProfile> list = Vault.routers(this);
+        final String ssid = NetworkEngine.snapshot(this).ssid;
+        checker.execute(() -> {
+            final Map<String, int[]> result = new HashMap<>();
+            for (RouterProfile p : list) {
+                int local = RouterStatus.OFFLINE;
+                // نفس العنوان المحلي قد يكون لراوتر شخص آخر: نعتبره راوترنا فقط على شبكة البيت.
+                if (onHomeNetwork(p, ssid)) local = RouterStatus.check(p.localUrl, 2500);
+                int remote = p.remoteEnabled && !p.remoteUrl.isEmpty()
+                        ? RouterStatus.check(p.remoteUrl, 6000) : RouterStatus.OFFLINE;
+                result.put(p.id, new int[]{local, remote});
+            }
+            ui.post(() -> {
+                checking = false;
+                routerState.clear();
+                routerState.putAll(result);
+                if (page == 2 && !isFinishing()) showPage(2);
+            });
+        });
+        if (page == 2) showPage(2);
+    }
+
+    private static boolean onHomeNetwork(RouterProfile p, String currentSsid) {
+        if (p.homeSsid.isEmpty() || currentSsid == null || currentSsid.isEmpty()
+                || currentSsid.equals("شبكة متصلة")) {
+            return true;
+        }
+        return p.homeSsid.equals(currentSsid);
+    }
+
+    private void detectBanner(final String gateway) {
+        LinearLayout c = card(null);
+        c.setBackground(Ui.shape(this, 0x1A22D3EE, Ui.CYAN, 18));
+        if (detecting || !detectedGateway.equals(gateway)) {
+            c.addView(Ui.text(this, "جاري التعرف على راوتر شبكتك…", 14, Ui.CYAN, true));
+            if (!detecting) {
+                detecting = true;
+                checker.execute(() -> {
+                    final String vendor = RouterDetect.detect("http://" + gateway);
+                    ui.post(() -> {
+                        detecting = false;
+                        detectedGateway = gateway;
+                        detectedVendor = vendor;
+                        if (page == 2 && !isFinishing()) showPage(2);
+                    });
+                });
+            }
+            return;
+        }
+        c.addView(Ui.text(this, "لكيت راوتر على شبكتك", 15, Ui.WHITE, true));
+        c.addView(Ui.text(this, RouterDetect.name(detectedVendor) + "  •  " + gateway, 13, Ui.CYAN, false), Ui.top(this, 4));
+        btn(c, "احفظه بالتطبيق", Ui.GREEN, v -> editRouter(null, "http://" + gateway, detectedVendor));
+    }
+
+    /** يفتح محلياً إذا الراوتر قريب، وإلا عن بعد إذا مفعّل. */
+    private void openSmart(final RouterProfile p, int local, int remote) {
+        if (local == RouterStatus.ONLINE) {
+            open(p, false);
+        } else if (p.remoteEnabled && !p.remoteUrl.isEmpty()) {
+            if (remote == RouterStatus.OFFLINE) Ui.toast(this, "الراوتر ما رد من بعيد، أحاول مرة ثانية…");
+            open(p, true);
+        } else if (local == RouterStatus.UNKNOWN) {
+            open(p, false);
+        } else {
+            new AlertDialog.Builder(this)
+                    .setTitle(p.name + " غير متصل")
+                    .setMessage("الراوتر ما يرد. إما أنت مو على شبكة البيت، أو الراوتر طافي.\n\n"
+                            + "حتى تتحكم بيه من أي مكان، فعّل «تحكم من بعيد».")
+                    .setPositiveButton("إعداد التحكم من بعيد", (d, w) -> remoteSetup(p))
+                    .setNeutralButton("حاول تفتحه", (d, w) -> open(p, false))
+                    .setNegativeButton("إلغاء", null)
+                    .show();
+        }
+    }
+
+    private void open(RouterProfile p, boolean remote) {
+        Class<?> target = "tenda".equals(p.vendor) ? NativeControlActivity.class : RouterActivity.class;
+        startActivity(new Intent(this, target)
                 .putExtra(RouterActivity.EXTRA_ID, p.id)
                 .putExtra(RouterActivity.EXTRA_REMOTE, remote));
+    }
+
+    private void openWeb(RouterProfile p, boolean remote, String hint) {
+        startActivity(new Intent(this, RouterActivity.class)
+                .putExtra(RouterActivity.EXTRA_ID, p.id)
+                .putExtra(RouterActivity.EXTRA_REMOTE, remote)
+                .putExtra(RouterActivity.EXTRA_HINT, hint));
+    }
+
+    private void routerMenu(final RouterProfile p) {
+        String[] items = {"لوحة الراوتر الكاملة", "إعداد التحكم من بعيد", "دليل الميزات", "تعديل", "حذف"};
+        new AlertDialog.Builder(this)
+                .setTitle(p.name)
+                .setItems(items, (d, w) -> {
+                    if (w == 0) openWeb(p, false, null);
+                    else if (w == 1) remoteSetup(p);
+                    else if (w == 2) new AlertDialog.Builder(this)
+                            .setTitle(RouterDetect.name(p.vendor))
+                            .setMessage(RouterDetect.guide(p.vendor))
+                            .setPositiveButton("تم", null)
+                            .show();
+                    else if (w == 3) editRouter(p, null, p.vendor);
+                    else confirmDelete(p);
+                })
+                .show();
+    }
+
+    private void remoteSetup(final RouterProfile p) {
+        LinearLayout f = form();
+        f.addView(Ui.text(this, "حتى توصل لراوترك من أي مكان لازم شغلتين:\n"
+                + "١. تفعّل Remote Web Management بالراوتر.\n"
+                + "٢. يكون عند الراوتر عنوان عام من شركة الإنترنت (مو CGNAT).\n\n"
+                + "اكتب العنوان، مثلاً http://1.2.3.4:8080 أو عنوان DDNS.", 13, Ui.MUTED, false));
+        final EditText url = Ui.input(this, "عنوان التحكم من بعيد",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        url.setText(p.remoteUrl);
+        f.addView(url);
+        boolean tenda = "tenda".equals(p.vendor);
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("التحكم من بعيد • " + p.name)
+                .setView(f)
+                .setPositiveButton("حفظ وتفعيل", null)
+                .setNeutralButton(tenda ? "افحص راوتري" : "افتح إعدادات الراوتر", null)
+                .setNegativeButton("إلغاء", null)
+                .create();
+        dlg.show();
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String u = RouterProfile.normalize(url.getText().toString());
+            if (u.isEmpty()) {
+                Ui.toast(this, "اكتب العنوان أولاً");
+                return;
+            }
+            p.remoteUrl = u;
+            p.remoteEnabled = true;
+            saveQuietly(p);
+            dlg.dismiss();
+            checkAll();
+        });
+        dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            dlg.dismiss();
+            if (tenda) {
+                tendaRemoteCheck(p);
+            } else {
+                openWeb(p, false, "دوّر على Remote Management (أو Remote Web Management) وفعّلها، وسجّل رقم المنفذ.");
+            }
+        });
+    }
+
+    /** يقرأ عنوان WAN من راوتر Tenda (قراءة فقط) ويحكم هل التحكم من بعيد ممكن. */
+    private void tendaRemoteCheck(final RouterProfile p) {
+        Ui.toast(this, "جاري فحص الراوتر…");
+        checker.execute(() -> {
+            String wan = null, remoteEn = null, error = null;
+            try {
+                TendaDriver d = new TendaDriver(p.localUrl);
+                if (!d.login(p.username, p.password)) {
+                    error = "ما كدرت أدخل للراوتر. لازم تكون متصل بشبكة البيت وكلمة المرور صحيحة.";
+                } else {
+                    JSONObject st = d.status();
+                    wan = TendaDriver.findWanIp(st);
+                    remoteEn = TendaDriver.findRemoteEnabled(st);
+                }
+            } catch (Exception e) {
+                error = "ما كدرت أقرا معلومات الراوتر: " + e.getMessage();
+            }
+            final String fWan = wan, fRemote = remoteEn, fError = error;
+            ui.post(() -> {
+                if (!isFinishing()) showRemoteVerdict(p, fWan, fRemote, fError);
+            });
+        });
+    }
+
+    private void showRemoteVerdict(final RouterProfile p, final String wan, String remoteEn, String error) {
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("نتيجة الفحص").setNegativeButton("تم", null);
+        final String hint = "افتح الإعدادات المتقدمة (Advanced / Administration) ← Remote Web Management: "
+                + "فعّلها وخلي المنفذ 8080، ثم احفظ.";
+        if (error != null) {
+            b.setMessage(error);
+        } else if (wan == null) {
+            b.setMessage("دخلت للراوتر بس ما لكيت عنوانه على الإنترنت. افتح الراوتر ← تقرير تشخيص، ودزه للمطور حتى يضبطها.");
+        } else if (RouterStatus.isPrivateIpv4(wan)) {
+            b.setMessage("عنوان راوترك من جهة الإنترنت: " + wan + "\n\n"
+                    + "هذا عنوان داخلي من شركة الإنترنت (CGNAT)، يعني محد يكدر يوصل لراوترك من برّا، "
+                    + "فالتحكم من بعيد عن طريق الراوتر ما راح يشتغل.\n\nالحلول:\n"
+                    + "• اطلب من شركة الإنترنت IP عام (Public / Static IP).\n"
+                    + "• أو شغّل VPN مثل Tailscale على جهاز يبقى شغال بالبيت.\n"
+                    + "• أو استعمل تطبيق Tenda الرسمي، لأنه يمر عبر سيرفرات Tenda.");
+        } else {
+            String state = "1".equals(remoteEn) || "true".equals(remoteEn) ? "مفعّلة"
+                    : "0".equals(remoteEn) || "false".equals(remoteEn) ? "مطفية" : "غير معروفة";
+            b.setMessage("عنوان راوترك على الإنترنت: " + wan + "\nالإدارة عن بعد بالراوتر: " + state + "\n\n"
+                    + "انتبه: هذا العنوان غالباً يتغير لما الراوتر يطفي ويشتغل. للحل الدائم فعّل DDNS بالراوتر واستعمل عنوانه.")
+                    .setPositiveButton("استعمل http://" + wan + ":8080", (d, w) -> {
+                        p.remoteUrl = "http://" + wan + ":8080";
+                        p.remoteEnabled = true;
+                        saveQuietly(p);
+                        checkAll();
+                    })
+                    .setNeutralButton("افتح إعداداتها بالراوتر", (d, w) -> openWeb(p, false, hint));
+        }
+        b.show();
     }
 
     private void openGateway(String gateway) {
@@ -436,11 +746,11 @@ public class MainActivity extends BaseActivity {
         }
         for (RouterProfile p : Vault.routers(this)) {
             if (gateway.equals(Uri.parse(p.localUrl).getHost())) {
-                openRouter(p, false);
+                open(p, false);
                 return;
             }
         }
-        editRouter(null, "http://" + gateway);
+        editRouter(null, "http://" + gateway, "auto");
     }
 
     private void confirmDelete(final RouterProfile p) {
@@ -453,26 +763,28 @@ public class MainActivity extends BaseActivity {
                     } catch (Exception e) {
                         Ui.toast(this, "تعذّر الحذف");
                     }
+                    routerState.remove(p.id);
                     showPage(2);
                 })
                 .setNegativeButton("إلغاء", null)
                 .show();
     }
 
-    private void editRouter(RouterProfile existing, String presetLocal) {
+    private void editRouter(RouterProfile existing, String presetLocal, String presetVendor) {
         final RouterProfile p = existing != null ? existing : new RouterProfile();
+        if (existing == null && presetVendor != null) p.vendor = presetVendor;
+        if (existing == null && !"auto".equals(p.vendor) && !"generic".equals(p.vendor)) {
+            p.name = RouterDetect.name(p.vendor);
+        }
         LinearLayout f = form();
         final EditText name = Ui.input(this, "اسم الراوتر (مثلاً: البيت)", InputType.TYPE_CLASS_TEXT);
-        final EditText local = Ui.input(this, "العنوان المحلي: 192.168.1.1",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        final EditText remote = Ui.input(this, "عنوان التحكم من بعيد (اختياري)",
+        final EditText local = Ui.input(this, "العنوان المحلي: 192.168.0.1",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         final EditText user = Ui.input(this, "اسم المستخدم", InputType.TYPE_CLASS_TEXT);
         final EditText pass = Ui.input(this, "كلمة مرور لوحة الراوتر",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         name.setText(p.name);
         local.setText(existing == null && presetLocal != null ? presetLocal : p.localUrl);
-        remote.setText(p.remoteUrl);
         user.setText(p.username);
         pass.setText(p.password);
         final String[] vendor = {p.vendor};
@@ -486,9 +798,10 @@ public class MainActivity extends BaseActivity {
                 .show());
         f.addView(name);
         f.addView(local);
-        f.addView(remote);
         f.addView(user);
         f.addView(pass);
+        f.addView(Ui.text(this, "Tenda: اسم المستخدم admin، وكلمة المرور هي نفسها اللي تدخل بيها لصفحة الراوتر.",
+                12, Ui.MUTED, false), Ui.top(this, 6));
         f.addView(vb, Ui.top(this, 10));
         ScrollView sv = new ScrollView(this);
         sv.addView(f);
@@ -510,13 +823,17 @@ public class MainActivity extends BaseActivity {
             String n = name.getText().toString().trim();
             p.name = n.isEmpty() ? String.valueOf(Uri.parse(l).getHost()) : n;
             p.localUrl = l;
-            p.remoteUrl = RouterProfile.normalize(remote.getText().toString());
             p.username = user.getText().toString().trim();
             p.password = pass.getText().toString();
             p.vendor = vendor[0];
+            NetworkEngine.Snapshot s = NetworkEngine.snapshot(this);
+            if (s.connected && s.gateway.equals(Uri.parse(l).getHost()) && !s.ssid.equals("شبكة متصلة")) {
+                p.homeSsid = s.ssid;
+            }
             try {
                 Vault.put(this, p);
                 dlg.dismiss();
+                lastCheck = 0;
                 showPage(2);
             } catch (Exception e) {
                 Ui.toast(this, "تعذّر الحفظ: " + e.getMessage());
@@ -621,7 +938,7 @@ public class MainActivity extends BaseActivity {
 
         LinearLayout ab = card("معلومة");
         info(ab, "لا يرسل التطبيق معلوماتك لأي خادم. كلمات مرور الراوترات تُحفظ مشفّرة على هذا الهاتف فقط وتُرسل للراوتر نفسه عند الدخول. الفحص يستعمل واجهات أندرويد الرسمية ولا يحتاج روت.");
-        info(ab, "WiFi Guard • 2.0.0");
+        info(ab, "WiFi Guard • 2.1.0");
     }
 
     private void showHistory() {

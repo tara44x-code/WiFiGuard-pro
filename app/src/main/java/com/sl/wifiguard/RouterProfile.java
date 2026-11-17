@@ -12,6 +12,9 @@ final class RouterProfile {
     String username = "admin";
     String password = "";
     String vendor = "auto";
+    boolean remoteEnabled;
+    /** اسم شبكة البيت وقت الحفظ: حتى لا نرسل كلمة المرور لراوتر غريب له نفس العنوان المحلي. */
+    String homeSsid = "";
 
     JSONObject toJson() throws JSONException {
         JSONObject o = new JSONObject();
@@ -22,6 +25,8 @@ final class RouterProfile {
         o.put("username", username);
         o.put("password", password);
         o.put("vendor", vendor);
+        o.put("remoteEnabled", remoteEnabled);
+        o.put("homeSsid", homeSsid);
         return o;
     }
 
@@ -34,6 +39,8 @@ final class RouterProfile {
         p.username = o.optString("username", "admin");
         p.password = o.optString("password", "");
         p.vendor = o.optString("vendor", "auto");
+        p.remoteEnabled = o.optBoolean("remoteEnabled", !p.remoteUrl.isEmpty());
+        p.homeSsid = o.optString("homeSsid", "");
         return p;
     }
 
