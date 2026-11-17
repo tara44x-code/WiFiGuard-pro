@@ -79,6 +79,7 @@ public class RouterActivity extends BaseActivity {
             h.setPadding(hp, hp, hp, hp);
             h.setBackground(Ui.shape(this, 0x22FBBF24, Ui.GOLD, 12));
             h.setOnClickListener(v -> h.setVisibility(View.GONE));
+            h.setTextDirection(View.TEXT_DIRECTION_RTL);
             head.addView(h, Ui.top(this, 8));
         }
         root.addView(head);

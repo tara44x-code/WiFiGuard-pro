@@ -679,7 +679,7 @@ public class MainActivity extends BaseActivity {
             if (tenda) {
                 tendaRemoteCheck(p);
             } else {
-                openWeb(p, false, "دوّر على Remote Management (أو Remote Web Management) وفعّلها، وسجّل رقم المنفذ.");
+                openWeb(p, false, "دوّر على ⁦Remote Management⁩ (أو ⁦Remote Web Management)⁩ وفعّلها، وسجّل رقم المنفذ.");
             }
         });
     }
@@ -710,7 +710,7 @@ public class MainActivity extends BaseActivity {
 
     private void showRemoteVerdict(final RouterProfile p, final String wan, String remoteEn, String error) {
         AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("نتيجة الفحص").setNegativeButton("تم", null);
-        final String hint = "افتح الإعدادات المتقدمة (Advanced / Administration) ← Remote Web Management: "
+        final String hint = "افتح الإعدادات المتقدمة (⁦Advanced / Administration)⁩ ← ⁦Remote Web Management⁩: "
                 + "فعّلها وخلي المنفذ 8080، ثم احفظ.";
         if (error != null) {
             b.setMessage(error);

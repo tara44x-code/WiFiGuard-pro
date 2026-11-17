@@ -149,9 +149,9 @@ public class NativeControlActivity extends BaseActivity {
         switch (idx) {
             case 0: load(); break;
             case 1: confirmReboot(); break;
-            case 2: web("Wireless / WiFi Settings ← غيّر WiFi Password واحفظ. انتبه: كل الأجهزة راح تنفصل وترجع تتصل بالباسورد الجديد."); break;
-            case 3: web("Advanced ← MAC Filter أو Blacklist: ضيف الجهاز للقائمة السوداء. تكدر تستعمل «الرقابة» من بطاقة الجهاز هم."); break;
-            case 4: web("Advanced / Administration ← Remote Web Management: فعّلها وخلي المنفذ 8080. فحص التحكم من بعيد موجود بقائمة ⋮ بشاشة الراوترات."); break;
+            case 2: web("⁦Wireless / WiFi Settings⁩ ← غيّر ⁦WiFi Password⁩ واحفظ. انتبه: كل الأجهزة راح تنفصل وترجع تتصل بالباسورد الجديد."); break;
+            case 3: web("⁦Advanced⁩ ← ⁦MAC Filter⁩ أو ⁦Blacklist⁩: ضيف الجهاز للقائمة السوداء. تكدر تستعمل «الرقابة» من بطاقة الجهاز هم."); break;
+            case 4: web("⁦Advanced / Administration⁩ ← ⁦Remote Web Management⁩: فعّلها وخلي المنفذ 8080. فحص التحكم من بعيد موجود بقائمة ⋮ بشاشة الراوترات."); break;
             default: web(null);
         }
     }
