@@ -95,6 +95,7 @@ public class MainActivity extends BaseActivity {
         root.addView(nav, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
         setContentView(root);
         showPage(0);
+        if (prefs.getBoolean(WatchJobService.PREF_ALERTS, false)) WatchJobService.schedule(this, true);
     }
 
     @Override
@@ -109,6 +110,7 @@ public class MainActivity extends BaseActivity {
             }
             receiverOn = true;
         }
+        if (page == 3) routerDevicesFor = "";
         if (!Vault.isLocked()) showPage(page);
     }
 
@@ -626,18 +628,19 @@ public class MainActivity extends BaseActivity {
     }
 
     private void routerMenu(final RouterProfile p) {
-        String[] items = {"لوحة الراوتر الكاملة", "إعداد التحكم من بعيد", "دليل الميزات", "تعديل", "حذف"};
+        String[] items = {"لوحة الراوتر الكاملة", "إعداد التحكم من بعيد", "مشاركة الواي فاي (QR)", "دليل الميزات", "تعديل", "حذف"};
         new AlertDialog.Builder(this)
                 .setTitle(p.name)
                 .setItems(items, (d, w) -> {
                     if (w == 0) openWeb(p, false, null);
                     else if (w == 1) remoteSetup(p);
-                    else if (w == 2) new AlertDialog.Builder(this)
+                    else if (w == 2) WifiQr.show(this, p);
+                    else if (w == 3) new AlertDialog.Builder(this)
                             .setTitle(RouterDetect.name(p.vendor))
                             .setMessage(RouterDetect.guide(p.vendor))
                             .setPositiveButton("تم", null)
                             .show();
-                    else if (w == 3) editRouter(p, null, p.vendor);
+                    else if (w == 4) editRouter(p, null, p.vendor);
                     else confirmDelete(p);
                 })
                 .show();
@@ -843,13 +846,27 @@ public class MainActivity extends BaseActivity {
 
     // ---------------------------------------------------------------- الأجهزة
 
+    private List<NetDevice> routerDevices = new ArrayList<>();
+    private List<NetDevice> routerOffline = new ArrayList<>();
+    private String routerDevicesFor = "", routerDevicesError;
+    private boolean loadingRouterDevices;
+
     private void devices() {
-        heading("الأجهزة", "استكشاف استجابة الأجهزة على شبكتك المحلية");
+        heading("الأجهزة", "منو متصل بشبكتك");
         final NetworkEngine.Snapshot s = NetworkEngine.snapshot(this);
         if (!s.connected || s.ip.isEmpty()) {
             info(card("شبكة محلية غير متاحة"), "اتصل بالراوتر عبر Wi-Fi وبعنوان محلي لبدء اكتشاف الأجهزة.");
             return;
         }
+        for (RouterProfile r : Vault.routers(this)) {
+            if ("tenda".equals(r.vendor) && s.gateway.equals(Uri.parse(r.localUrl).getHost())) {
+                routerDevicesSection(r);
+                return;
+            }
+        }
+        LinearLayout tip = card(null);
+        info(tip, "هذا فحص عام يطلع العناوين بس. حتى تطلع أسماء الأجهزة وتتحكم بيها، احفظ راوترك من تبويب «الراوترات» "
+                + "(متوفر هسه لراوترات Tenda).");
         LinearLayout st = card("حالة الفحص");
         if (scanningDevices) {
             st.addView(Ui.text(this, "الفحص جارٍ…", 16, Ui.CYAN, true), Ui.top(this, 4));
@@ -869,6 +886,67 @@ public class MainActivity extends BaseActivity {
         LinearLayout n = card("حدود الفحص");
         info(n, "يتم تجربة استجابة الشبكة ضمن نطاق محلي واحد، بحد أقصى 254 عنواناً. عدم ظهور الأجهزة لا يعني عدم اتصالها.");
         info(n, "هذه ليست قائمة الراوتر الرسمية؛ للحصول على جميع العملاء المتصلين استخدم لوحة إدارة الراوتر من تبويب «الراوترات».");
+    }
+
+    /** قائمة الأجهزة من راوتر Tenda نفسه: أسماء، أنواع، استهلاك، وآخر ظهور. */
+    private void routerDevicesSection(final RouterProfile r) {
+        LinearLayout st = card(r.name);
+        if (loadingRouterDevices) {
+            st.addView(Ui.text(this, "جاري قراءة الأجهزة من الراوتر…", 15, Ui.CYAN, true), Ui.top(this, 4));
+        } else if (routerDevicesError != null) {
+            st.addView(Ui.text(this, "ما كدرت أقرا الأجهزة: " + routerDevicesError, 14, Ui.RED, false), Ui.top(this, 4));
+        } else {
+            int online = 0;
+            for (NetDevice d : routerDevices) if (d.online) online++;
+            st.addView(Ui.text(this, online + " جهاز متصل الآن", 16, Ui.WHITE, true), Ui.top(this, 4));
+        }
+        LinearLayout bar = Ui.row(this);
+        bar.addView(Ui.button(this, "تحديث ↻", Ui.CYAN, v -> {
+            routerDevicesFor = "";
+            showPage(3);
+        }), Ui.weight(this, 3));
+        bar.addView(Ui.button(this, "لوحة الراوتر", Ui.GREEN, v -> open(r, false)), Ui.weight(this, 3));
+        st.addView(bar, Ui.top(this, 10));
+
+        if (!r.id.equals(routerDevicesFor) && !loadingRouterDevices) {
+            loadingRouterDevices = true;
+            routerDevicesFor = r.id;
+            checker.execute(() -> {
+                List<NetDevice> list = new ArrayList<>(), off = new ArrayList<>();
+                String error = null;
+                try {
+                    TendaDriver d = new TendaDriver(r.localUrl);
+                    if (!d.login(r.username, r.password)) throw new Exception("فشل تسجيل الدخول");
+                    list = d.devices();
+                    DeviceStore.merge(this, r.id, list);
+                    off = DeviceStore.offline(this, r.id, list);
+                    int online = 0;
+                    for (NetDevice n : list) if (n.online) online++;
+                    RouterWidget.save(this, r.name, true, online);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                }
+                final List<NetDevice> fl = list, fo = off;
+                final String fe = error;
+                ui.post(() -> {
+                    loadingRouterDevices = false;
+                    routerDevices = fl;
+                    routerOffline = fo;
+                    routerDevicesError = fe;
+                    if (page == 3 && !isFinishing()) showPage(3);
+                });
+            });
+        }
+
+        List<NetDevice> on = new ArrayList<>(), off = new ArrayList<>(routerOffline);
+        for (NetDevice d : routerDevices) (d.online ? on : off).add(d);
+        java.util.Collections.sort(on, (a, b) -> Long.compare(b.down + b.up, a.down + a.up));
+        java.util.Collections.sort(off, (a, b) -> Long.compare(b.lastSeen, a.lastSeen));
+        for (NetDevice d : on) content.addView(DeviceRow.build(this, r, false, d));
+        if (!off.isEmpty()) {
+            content.addView(Ui.text(this, "غير متصلة حالياً", 13, Ui.MUTED, true), Ui.top(this, 10));
+            for (NetDevice d : off) content.addView(DeviceRow.build(this, r, false, d));
+        }
     }
 
     private void beginDeviceScan(String localIp) {
@@ -917,6 +995,15 @@ public class MainActivity extends BaseActivity {
         btn(bk, "تصدير نسخة مشفّرة", Ui.BLUE, v -> exportBackup());
         btn(bk, "استرجاع نسخة", Ui.MUTED, v -> importBackup());
 
+        LinearLayout al = card("التنبيهات والويدجت");
+        toggle(al, "تنبيه لما يتصل جهاز جديد بالراوتر", prefs.getBoolean(WatchJobService.PREF_ALERTS, false), on -> {
+            prefs.edit().putBoolean(WatchJobService.PREF_ALERTS, on).apply();
+            WatchJobService.schedule(this, on);
+            if (on) alertsPermissions();
+        });
+        info(al, "يفحص كل ربع ساعة تقريباً (أقل مدة يسمحها أندرويد). يشتغل لراوترات Tenda، وأنت بالبيت أو من برّا إذا التحكم من بعيد مفعّل.");
+        info(al, "الويدجت: اضغط مطوّلاً على الشاشة الرئيسية للهاتف ← Widgets ← WiFi Guard.");
+
         LinearLayout pf = card("التفضيلات");
         toggle(pf, "تحديث عند فتح قائمة الشبكات", prefs.getBoolean("auto_refresh", true),
                 on -> prefs.edit().putBoolean("auto_refresh", on).apply());
@@ -938,7 +1025,26 @@ public class MainActivity extends BaseActivity {
 
         LinearLayout ab = card("معلومة");
         info(ab, "لا يرسل التطبيق معلوماتك لأي خادم. كلمات مرور الراوترات تُحفظ مشفّرة على هذا الهاتف فقط وتُرسل للراوتر نفسه عند الدخول. الفحص يستعمل واجهات أندرويد الرسمية ولا يحتاج روت.");
-        info(ab, "WiFi Guard • 2.1.0");
+        info(ab, "WiFi Guard • 2.2.0");
+    }
+
+    private void alertsPermissions() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 8);
+        }
+        if (Build.VERSION.SDK_INT >= 29
+                && checkSelfPermission("android.permission.ACCESS_BACKGROUND_LOCATION") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            new AlertDialog.Builder(this)
+                    .setTitle("حتى تشتغل التنبيهات بالبيت")
+                    .setMessage("أندرويد ما يخلي التطبيق يعرف اسم الواي فاي وهو مسدود إلا إذا سمحت للموقع «طوال الوقت». "
+                            + "بدونه التنبيهات تشتغل بس عن طريق التحكم من بعيد.\n\n"
+                            + "من الصفحة اللي تنفتح: الأذونات ← الموقع ← السماح طوال الوقت.")
+                    .setPositiveButton("فتح الإعدادات", (d, w) -> startActivity(new Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))))
+                    .setNegativeButton("لاحقاً", null)
+                    .show();
+        }
     }
 
     private void showHistory() {

@@ -15,6 +15,9 @@ final class RouterProfile {
     boolean remoteEnabled;
     /** اسم شبكة البيت وقت الحفظ: حتى لا نرسل كلمة المرور لراوتر غريب له نفس العنوان المحلي. */
     String homeSsid = "";
+    /** لمشاركة الواي فاي بـ QR فقط. */
+    String wifiSsid = "";
+    String wifiPassword = "";
 
     JSONObject toJson() throws JSONException {
         JSONObject o = new JSONObject();
@@ -27,6 +30,8 @@ final class RouterProfile {
         o.put("vendor", vendor);
         o.put("remoteEnabled", remoteEnabled);
         o.put("homeSsid", homeSsid);
+        o.put("wifiSsid", wifiSsid);
+        o.put("wifiPassword", wifiPassword);
         return o;
     }
 
@@ -41,6 +46,8 @@ final class RouterProfile {
         p.vendor = o.optString("vendor", "auto");
         p.remoteEnabled = o.optBoolean("remoteEnabled", !p.remoteUrl.isEmpty());
         p.homeSsid = o.optString("homeSsid", "");
+        p.wifiSsid = o.optString("wifiSsid", "");
+        p.wifiPassword = o.optString("wifiPassword", "");
         return p;
     }
 

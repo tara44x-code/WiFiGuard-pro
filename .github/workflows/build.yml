@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,10 +24,37 @@ jobs:
         with:
           gradle-version: '8.14.3'
 
-      - name: Build debug APK
+      - name: Prepare signing key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "$SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/wifiguard.jks"
+            echo "WG_KEYSTORE=$RUNNER_TEMP/wifiguard.jks" >> "$GITHUB_ENV"
+            echo "Signing with the fixed WiFi Guard key"
+          else
+            echo "::warning::SIGNING_KEY secret is not set; each build gets a new key and must be uninstalled before updating."
+          fi
+
+      - name: Build APK
+        env:
+          WG_KEY_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: WiFiGuard-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Publish fixed download link
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk WiFiGuard.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest WiFiGuard.apk \
+            --target "$GITHUB_SHA" \
+            --title "WiFi Guard — آخر نسخة" \
+            --notes "نسخة مبنية تلقائياً من آخر تعديل (${GITHUB_SHA::7}). رابط التحميل الثابت: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/WiFiGuard.apk" \
+            --latest

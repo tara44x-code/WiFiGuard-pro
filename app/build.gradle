@@ -10,8 +10,22 @@ android {
         applicationId 'com.sl.wifiguard'
         minSdk 26
         targetSdk 34
-        versionCode 3
-        versionName '2.1.0'
+        versionCode 4
+        versionName '2.2.0'
+    }
+
+    signingConfigs {
+        // على GitHub: إذا وُجد سر SIGNING_KEY يُوقَّع كل بناء بنفس المفتاح،
+        // فيتثبت التحديث فوق النسخة القديمة بدون حذف البيانات.
+        debug {
+            def ks = System.getenv('WG_KEYSTORE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('WG_KEY_PASSWORD')
+                keyAlias 'wifiguard'
+                keyPassword System.getenv('WG_KEY_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
@@ -30,4 +44,7 @@ android {
     }
 }
 
-// لا توجد مكتبات خارجية: التطبيق يعتمد على واجهات أندرويد فقط.
+dependencies {
+    // توليد رمز QR لمشاركة الواي فاي (بدون إنترنت).
+    implementation 'com.google.zxing:core:3.5.3'
+}

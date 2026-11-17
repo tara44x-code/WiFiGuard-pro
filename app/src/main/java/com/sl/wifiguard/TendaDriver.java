@@ -13,6 +13,8 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -150,6 +152,140 @@ final class TendaDriver {
             sb.append(eq > 0 ? part.substring(0, eq).trim() : part.trim());
         }
         return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- الأجهزة
+
+    /** كلمات تُحظر بها المواقع الإباحية عبر فلتر المواقع بالراوتر (يطابق أي عنوان يحتوي الكلمة). */
+    static final String ADULT_KEYWORDS = "porn,xxx,xnxx,xvideos,xhamster,pornhub,redtube,youporn,spankbang,"
+            + "onlyfans,brazzers,chaturbate,stripchat,bongacams,livejasmin,sex";
+
+    /**
+     * قيمة «قائمة سوداء» في limit_type. الافتراضي بواجهة Tenda قائمة سوداء والمثال المنشور يرجع 1،
+     * لكنها غير مؤكدة لكل إصدار؛ لذلك نطلب من المستخدم يتأكد مرة من لوحة الراوتر.
+     */
+    static final String LIMIT_BLACKLIST = "1";
+
+    /** يدمج قائمة المتصلين (getOnlineList) مع جدول السرعة (GetNetControlList) حسب عنوان MAC. */
+    List<NetDevice> devices() throws IOException, JSONException {
+        Map<String, NetDevice> map = new LinkedHashMap<>();
+        boolean onlineWorked = false;
+        try {
+            JSONArray online = firstArray(get("/goform/getOnlineList"));
+            for (int i = 0; i < online.length(); i++) {
+                JSONObject o = online.optJSONObject(i);
+                if (o == null) continue;
+                String mac = NetDevice.normalizeMac(o.optString("deviceId", o.optString("mac", "")));
+                if (!mac.contains(":")) continue;
+                NetDevice d = device(map, mac);
+                d.ip = o.optString("ip", d.ip);
+                d.routerName = o.optString("devName", o.optString("hostName", d.routerName));
+                d.online = true;
+                d.blacklisted = "1".equals(o.optString("black", "0"));
+                d.up = num(o.optString("uploadSpeed", "0"));
+                d.down = num(o.optString("downloadSpeed", "0"));
+                onlineWorked = true;
+            }
+        } catch (Exception ignored) {
+            // بعض الإصدارات ما بيها هذا المسار؛ نكمل بجدول السرعة.
+        }
+        JSONArray net;
+        try {
+            net = netControl();
+        } catch (IOException | JSONException e) {
+            if (onlineWorked) return new ArrayList<>(map.values());
+            throw e;
+        }
+        for (int i = 0; i < net.length(); i++) {
+            JSONObject o = net.optJSONObject(i);
+            if (o == null || !o.has("mac")) continue;
+            String mac = NetDevice.normalizeMac(o.optString("mac"));
+            boolean known = map.containsKey(mac);
+            NetDevice d = device(map, mac);
+            if (d.ip.isEmpty()) d.ip = o.optString("ip", "");
+            if (d.routerName.isEmpty()) d.routerName = o.optString("hostName", "");
+            d.limitUp = num(o.optString("limitUp", "0"));
+            d.limitDown = num(o.optString("limitDown", "0"));
+            if (!onlineWorked || !known) {
+                d.online = !onlineWorked && !"1".equals(o.optString("offline", "0"));
+                if (d.down == 0) d.down = num(o.optString("downSpeed", "0"));
+                if (d.up == 0) d.up = num(o.optString("upSpeed", "0"));
+            }
+        }
+        return new ArrayList<>(map.values());
+    }
+
+    private static NetDevice device(Map<String, NetDevice> map, String mac) {
+        NetDevice d = map.get(mac);
+        if (d == null) {
+            d = new NetDevice();
+            d.mac = mac;
+            map.put(mac, d);
+        }
+        return d;
+    }
+
+    private static long num(String s) {
+        try {
+            return Math.round(Double.parseDouble(s.trim()));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static JSONArray firstArray(String text) throws JSONException {
+        String t = text == null ? "" : text.trim();
+        if (t.startsWith("[")) return new JSONArray(t);
+        if (t.startsWith("{")) {
+            JSONObject o = new JSONObject(t);
+            JSONArray names = o.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    Object v = o.opt(names.optString(i));
+                    if (v instanceof JSONArray) return (JSONArray) v;
+                }
+            }
+        }
+        return new JSONArray();
+    }
+
+    /** يغيّر اسم الجهاز بالراوتر نفسه، ثم يقرأ القائمة ويتأكد أن الاسم انحفظ. */
+    boolean rename(String mac, String name) throws IOException, JSONException {
+        post("/goform/SetOnlineDevName", "mac=" + enc(mac) + "&devName=" + enc(name));
+        for (NetDevice d : devices()) {
+            if (d.mac.equals(NetDevice.normalizeMac(mac))) return name.equals(d.routerName);
+        }
+        return false;
+    }
+
+    /**
+     * يحوّل سياسة الجهاز لقاعدة رقابة أبوية وحدة بالراوتر، ثم يقرأها ويتأكد أنها انحفظت.
+     * <ul>
+     * <li>قطع النت: أيام السماح كلها 0.</li>
+     * <li>وقت السماح: حقل time (النت مسموح فقط بهذا الوقت).</li>
+     * <li>المواقع الإباحية: فلتر المواقع بقائمة سوداء من الكلمات.</li>
+     * </ul>
+     */
+    boolean applyPolicy(String mac, DeviceStore.Policy p) throws IOException, JSONException {
+        JSONObject cfg = parentControl(mac);
+        String day = p.blocked ? "0,0,0,0,0,0,0" : "1,1,1,1,1,1,1";
+        if (p.any()) {
+            cfg.put("enable", "1");
+            cfg.put("day", day);
+            cfg.put("time", p.allowed.isEmpty() ? "00:00-23:59" : p.allowed);
+            cfg.put("url_enable", p.adultFilter ? "1" : "0");
+            cfg.put("urls", p.adultFilter ? ADULT_KEYWORDS : "");
+            cfg.put("limit_type", LIMIT_BLACKLIST);
+        } else {
+            cfg.put("enable", "0");
+            cfg.put("url_enable", "0");
+        }
+        setParentControl(mac, cfg);
+        JSONObject back = parentControl(mac);
+        if (!p.any()) return "0".equals(back.optString("enable"));
+        return "1".equals(back.optString("enable"))
+                && day.equals(back.optString("day").replace(" ", ""))
+                && (p.adultFilter ? "1" : "0").equals(back.optString("url_enable"));
     }
 
     void reboot() throws IOException {

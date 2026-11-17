@@ -237,8 +237,8 @@ public class RouterActivity extends BaseActivity {
     private void tools() {
         final boolean tenda = "tenda".equals(profile.vendor);
         String[] items = tenda
-                ? new String[]{"دليل: تحديد السرعة وحظر المواقع", "إعادة كشف نوع الراوتر", "تحكم مباشر بالأجهزة (تجريبي)"}
-                : new String[]{"دليل: تحديد السرعة وحظر المواقع", "إعادة كشف نوع الراوتر"};
+                ? new String[]{"دليل: تحديد السرعة وحظر المواقع", "إعادة كشف نوع الراوتر", "تقرير تشخيص (للمطور)", "تحكم مباشر بالأجهزة"}
+                : new String[]{"دليل: تحديد السرعة وحظر المواقع", "إعادة كشف نوع الراوتر", "تقرير تشخيص (للمطور)"};
         new AlertDialog.Builder(this)
                 .setTitle("أدوات الراوتر")
                 .setItems(items, (d, which) -> {
@@ -250,6 +250,8 @@ public class RouterActivity extends BaseActivity {
                                 .show();
                     } else if (which == 1) {
                         detectVendor();
+                    } else if (which == 2) {
+                        diagnostics();
                     } else {
                         startActivity(new Intent(this, NativeControlActivity.class)
                                 .putExtra(EXTRA_ID, profile.id)
@@ -257,6 +259,37 @@ public class RouterActivity extends BaseActivity {
                     }
                 })
                 .show();
+    }
+
+    /**
+     * تقرير لأي راوتر: هيكل الصفحة المفتوحة (العنوان، ملفات السكربت، أسماء الحقول والروابط) بدون أي قيم مكتوبة.
+     * افتح الصفحة اللي تريد ميزتها (مثلاً قائمة الأجهزة) ثم اطلب التقرير.
+     */
+    private void diagnostics() {
+        String js = "(function(){var o={title:document.title,url:location.href,scripts:[],forms:[],fields:[],links:[],frames:[]};"
+                + "function add(a,v){if(v&&a.length<80&&a.indexOf(v)<0)a.push(v);}"
+                + "document.querySelectorAll('script[src]').forEach(function(e){add(o.scripts,e.getAttribute('src'));});"
+                + "document.querySelectorAll('form').forEach(function(e){add(o.forms,(e.method||'')+' '+(e.getAttribute('action')||''));});"
+                + "document.querySelectorAll('input,select,button').forEach(function(e){add(o.fields,(e.type||e.tagName).toLowerCase()+':'+(e.name||e.id||''));});"
+                + "document.querySelectorAll('a[href]').forEach(function(e){add(o.links,e.getAttribute('href'));});"
+                + "document.querySelectorAll('iframe,frame').forEach(function(e){add(o.frames,e.getAttribute('src'));});"
+                + "o.text=(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,1500);"
+                + "return JSON.stringify(o);})()";
+        web.evaluateJavascript(js, result -> {
+            String body;
+            try {
+                body = new org.json.JSONObject(new org.json.JSONArray("[" + result + "]").getString(0)).toString(1);
+            } catch (Exception e) {
+                body = String.valueOf(result);
+            }
+            String report = "WiFi Guard • تقرير تشخيص\nالنوع: " + RouterDetect.name(profile.vendor)
+                    + "\nAndroid " + android.os.Build.VERSION.SDK_INT + " • " + (remote ? "remote" : "local")
+                    + "\n\n" + body;
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("text/plain");
+            i.putExtra(Intent.EXTRA_TEXT, report);
+            startActivity(Intent.createChooser(i, "إرسال تقرير التشخيص"));
+        });
     }
 
     @Override

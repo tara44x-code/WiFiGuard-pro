@@ -1,60 +1,43 @@
 package com.sl.wifiguard;
 
 import android.app.AlertDialog;
-import android.content.SharedPreferences;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
 import android.view.View;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * تحكم مباشر (تجريبي) عبر {@link TendaDriver}: قائمة الأجهزة من الراوتر نفسه،
- * تحديد سرعة جهاز، حظر مواقع، جدولة الإنترنت، وإعادة التشغيل.
- */
+/** لوحة راوتر Tenda المبسطة: حالة الراوتر، أزرار سريعة، والأجهزة مرتبة حسب الاستهلاك. */
 public class NativeControlActivity extends BaseActivity {
-    private interface Job {
-        String run() throws Exception;
-    }
-
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private SharedPreferences prefs;
     private RouterProfile profile;
     private TendaDriver driver;
-    private JSONArray table = new JSONArray();
+    private boolean remote, loading;
     private LinearLayout list;
     private TextView status;
     private RouterIcon icon;
-    private boolean remote;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        prefs = getSharedPreferences("wifi_guard_settings", MODE_PRIVATE);
         profile = Vault.find(this, String.valueOf(getIntent().getStringExtra(RouterActivity.EXTRA_ID)));
-        boolean remote = getIntent().getBooleanExtra(RouterActivity.EXTRA_REMOTE, false);
+        remote = getIntent().getBooleanExtra(RouterActivity.EXTRA_REMOTE, false);
         if (profile == null || profile.url(remote).isEmpty()) {
             finish();
             return;
         }
         driver = new TendaDriver(profile.url(remote));
 
-        this.remote = remote;
         LinearLayout root = Ui.column(this);
         root.setBackgroundColor(Ui.BG);
         root.setFitsSystemWindows(true);
@@ -66,7 +49,6 @@ public class NativeControlActivity extends BaseActivity {
         scroll.addView(page);
         root.addView(scroll, new LinearLayout.LayoutParams(Ui.MATCH, 0, 1f));
 
-        // بطاقة الراوتر
         LinearLayout hero = Ui.card(this);
         LinearLayout top = Ui.row(this);
         icon = new RouterIcon(this);
@@ -85,9 +67,8 @@ public class NativeControlActivity extends BaseActivity {
         hero.addView(status, Ui.top(this, 10));
         page.addView(hero);
 
-        // أزرار سريعة
-        String[] labels = {"تحديث ↻", "إعادة تشغيل", "باسورد الواي فاي", "حظر جهاز", "التحكم من بعيد", "لوحة الراوتر"};
-        int[] colors = {Ui.CYAN, Ui.RED, Ui.BLUE, Ui.GOLD, Ui.GREEN, Ui.MUTED};
+        String[] labels = {"تحديث ↻", "إعادة تشغيل", "مشاركة الواي فاي", "باسورد الواي فاي", "حماية كل البيت", "لوحة الراوتر"};
+        int[] colors = {Ui.CYAN, Ui.RED, Ui.GREEN, Ui.BLUE, Ui.GOLD, Ui.MUTED};
         for (int i = 0; i < labels.length; i += 2) {
             LinearLayout r = Ui.row(this);
             for (int k = i; k < i + 2; k++) {
@@ -100,36 +81,49 @@ public class NativeControlActivity extends BaseActivity {
         }
 
         LinearLayout head = Ui.row(this);
-        head.addView(Ui.text(this, "الأجهزة المتصلة", 17, Ui.WHITE, true), new LinearLayout.LayoutParams(0, Ui.WRAP, 1f));
+        head.addView(Ui.text(this, "الأجهزة", 17, Ui.WHITE, true), new LinearLayout.LayoutParams(0, Ui.WRAP, 1f));
         TextView diag = Ui.text(this, "تقرير تشخيص", 12, Ui.MUTED, false);
         diag.setOnClickListener(v -> diagnostics());
         head.addView(diag);
         page.addView(head, Ui.top(this, 18));
+        page.addView(Ui.text(this, "اضغط على أي جهاز حتى تسميه أو تقطع عنه النت أو تحظر المواقع الإباحية.",
+                12, Ui.MUTED, false), Ui.top(this, 2));
 
         list = Ui.column(this);
         list.setPadding(0, Ui.dp(this, 10), 0, 0);
         page.addView(list);
-        page.addView(Ui.text(this, "التحكم المباشر تجريبي. إذا زر ما اشتغل، دز «تقرير تشخيص» للمطور.", 12, Ui.MUTED, false),
-                Ui.top(this, 8));
         setContentView(root);
-        load();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!Vault.isLocked()) load();
     }
 
     private void load() {
+        if (loading) return;
+        loading = true;
         status.setTextColor(Ui.MUTED);
         status.setText("جاري الاتصال بالراوتر…");
         io.execute(() -> {
             try {
                 if (!driver.login(profile.username, profile.password)) {
-                    throw new Exception("فشل تسجيل الدخول. تأكد من كلمة المرور أو استعمل لوحة الراوتر.");
+                    throw new Exception("فشل تسجيل الدخول. تأكد من كلمة المرور.");
                 }
-                final JSONArray t = driver.netControl();
+                final List<NetDevice> devices = driver.devices();
+                DeviceStore.merge(this, profile.id, devices);
+                rememberHomeNetwork();
+                final List<NetDevice> offline = DeviceStore.offline(this, profile.id, devices);
                 ui.post(() -> {
+                    loading = false;
+                    if (isFinishing()) return;
                     icon.setOnline(true);
-                    render(t);
+                    render(devices, offline);
                 });
             } catch (final Exception e) {
                 ui.post(() -> {
+                    loading = false;
                     if (isFinishing()) return;
                     icon.setOnline(false);
                     status.setTextColor(Ui.RED);
@@ -145,22 +139,75 @@ public class NativeControlActivity extends BaseActivity {
         });
     }
 
+    private void render(List<NetDevice> devices, List<NetDevice> offline) {
+        list.removeAllViews();
+        List<NetDevice> on = new ArrayList<>(), off = new ArrayList<>(offline);
+        for (NetDevice d : devices) (d.online ? on : off).add(d);
+        Collections.sort(on, (a, b) -> Long.compare(b.down + b.up, a.down + a.up));
+        Collections.sort(off, (a, b) -> Long.compare(b.lastSeen, a.lastSeen));
+        int fresh = 0;
+        for (NetDevice d : on) if (d.isNew) fresh++;
+        RouterWidget.save(this, profile.name, true, on.size());
+
+        status.setTextColor(fresh > 0 ? Ui.GOLD : Ui.GREEN);
+        status.setText("● شغال  •  " + on.size() + " جهاز متصل" + (fresh > 0 ? "  •  " + fresh + " جديد" : ""));
+        for (NetDevice d : on) list.addView(DeviceRow.build(this, profile, remote, d));
+        if (!off.isEmpty()) {
+            list.addView(Ui.text(this, "غير متصلة حالياً", 13, Ui.MUTED, true), Ui.top(this, 10));
+            for (NetDevice d : off) list.addView(DeviceRow.build(this, profile, remote, d));
+        }
+    }
+
+    /** أول دخول ناجح محلياً: نحفظ اسم شبكة البيت حتى يعرف التطبيق (والتنبيهات) أنك بالبيت. */
+    private void rememberHomeNetwork() {
+        if (remote || !profile.homeSsid.isEmpty()) return;
+        String ssid = NetworkEngine.snapshot(this).ssid;
+        if (ssid.isEmpty() || ssid.equals("شبكة متصلة")) return;
+        profile.homeSsid = ssid;
+        try {
+            Vault.put(this, profile);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void action(int idx) {
         switch (idx) {
             case 0: load(); break;
             case 1: confirmReboot(); break;
-            case 2: web("⁦Wireless / WiFi Settings⁩ ← غيّر ⁦WiFi Password⁩ واحفظ. انتبه: كل الأجهزة راح تنفصل وترجع تتصل بالباسورد الجديد."); break;
-            case 3: web("⁦Advanced⁩ ← ⁦MAC Filter⁩ أو ⁦Blacklist⁩: ضيف الجهاز للقائمة السوداء. تكدر تستعمل «الرقابة» من بطاقة الجهاز هم."); break;
-            case 4: web("⁦Advanced / Administration⁩ ← ⁦Remote Web Management⁩: فعّلها وخلي المنفذ 8080. فحص التحكم من بعيد موجود بقائمة ⋮ بشاشة الراوترات."); break;
+            case 2: WifiQr.show(this, profile); break;
+            case 3: web("⁦Wireless / WiFi Settings⁩ ← غيّر ⁦WiFi Password⁩ واحفظ. انتبه: كل الأجهزة راح تنفصل وترجع تتصل بالباسورد الجديد."); break;
+            case 4: web("⁦Internet Settings⁩ ← ⁦DNS⁩: اختار ⁦Manual⁩ واكتب 1.1.1.3 بالأول و 1.0.0.3 بالثاني ثم ⁦Save⁩. هذا يحظر المواقع الإباحية والضارة على كل أجهزة البيت."); break;
             default: web(null);
         }
     }
 
     private void web(String hint) {
-        startActivity(new android.content.Intent(this, RouterActivity.class)
+        startActivity(new Intent(this, RouterActivity.class)
                 .putExtra(RouterActivity.EXTRA_ID, profile.id)
                 .putExtra(RouterActivity.EXTRA_REMOTE, remote)
                 .putExtra(RouterActivity.EXTRA_HINT, hint));
+    }
+
+    private void confirmReboot() {
+        new AlertDialog.Builder(this)
+                .setTitle("إعادة تشغيل الراوتر؟")
+                .setMessage("سينقطع الإنترنت عن كل الأجهزة لمدة دقيقة تقريباً.")
+                .setPositiveButton("إعادة تشغيل", (d, w) -> io.execute(() -> {
+                    String m;
+                    try {
+                        if (!driver.login(profile.username, profile.password)) throw new Exception("فشل تسجيل الدخول");
+                        driver.reboot();
+                        m = "تم إرسال أمر إعادة التشغيل";
+                    } catch (Exception e) {
+                        m = "فشل: " + e.getMessage();
+                    }
+                    final String shown = m;
+                    ui.post(() -> {
+                        if (!isFinishing()) status.setText(shown);
+                    });
+                }))
+                .setNegativeButton("إلغاء", null)
+                .show();
     }
 
     /** قراءة فقط: يجمع ردود الراوتر الخام بدون كلمة المرور حتى نعرف شكل واجهة هذا الموديل. */
@@ -184,227 +231,12 @@ public class NativeControlActivity extends BaseActivity {
             ui.post(() -> {
                 if (isFinishing()) return;
                 status.setText("");
-                android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                Intent i = new Intent(Intent.ACTION_SEND);
                 i.setType("text/plain");
-                i.putExtra(android.content.Intent.EXTRA_TEXT, report);
-                startActivity(android.content.Intent.createChooser(i, "إرسال تقرير التشخيص"));
+                i.putExtra(Intent.EXTRA_TEXT, report);
+                startActivity(Intent.createChooser(i, "إرسال تقرير التشخيص"));
             });
         });
-    }
-
-    private void render(JSONArray t) {
-        if (isFinishing()) return;
-        table = t;
-        list.removeAllViews();
-        String knownKey = "known_" + profile.id;
-        boolean firstRun = !prefs.contains(knownKey);
-        Set<String> known = new HashSet<>(Arrays.asList(prefs.getString(knownKey, "").split(",")));
-        int count = 0, fresh = 0;
-        for (int i = 0; i < t.length(); i++) {
-            final JSONObject o = t.optJSONObject(i);
-            if (o == null || !o.has("mac")) continue;
-            count++;
-            final String mac = o.optString("mac");
-            boolean isNew = !firstRun && !known.contains(mac);
-            if (isNew) fresh++;
-            known.add(mac);
-
-            LinearLayout card = Ui.card(this);
-            String alias = prefs.getString("name_" + mac, "");
-            String shown = alias.isEmpty() ? o.optString("hostName", "جهاز") : alias;
-            card.addView(Ui.text(this, shown + (isNew ? "   ● جديد" : ""), 16, isNew ? Ui.GOLD : Ui.WHITE, true));
-            card.addView(Ui.text(this, o.optString("ip") + "  •  " + mac, 12, Ui.MUTED, false));
-            card.addView(Ui.text(this, "الاستهلاك الآن: ↓ " + o.optString("downSpeed", "0") + "  ↑ "
-                    + o.optString("upSpeed", "0") + " KB/s", 12, Ui.MUTED, false));
-            card.addView(Ui.text(this, "الحد: ↓ " + o.optString("limitDown", "0") + "  ↑ "
-                    + o.optString("limitUp", "0") + " KB/s", 13, Ui.CYAN, false));
-            LinearLayout r = Ui.row(this);
-            r.addView(Ui.button(this, "السرعة", Ui.CYAN, v -> speedDialog(o)), Ui.weight(this, 3));
-            r.addView(Ui.button(this, "الرقابة", Ui.GREEN, v -> parentDialog(mac, shown)), Ui.weight(this, 3));
-            r.addView(Ui.button(this, "تسمية", Ui.MUTED, v -> renameDialog(mac, shown)), Ui.weight(this, 3));
-            card.addView(r, Ui.top(this, 10));
-            list.addView(card);
-        }
-        StringBuilder joined = new StringBuilder();
-        for (String m : known) if (!m.isEmpty()) joined.append(m).append(',');
-        prefs.edit().putString(knownKey, joined.toString()).apply();
-        status.setTextColor(fresh > 0 ? Ui.GOLD : Ui.MUTED);
-        status.setText(count + " جهاز" + (fresh > 0 ? "  •  " + fresh + " جديد منذ آخر فحص" : ""));
-    }
-
-    private void run(final Job job) {
-        status.setText("جاري التنفيذ…");
-        io.execute(() -> {
-            String message;
-            try {
-                message = "رد الراوتر: " + job.run();
-            } catch (Exception e) {
-                message = "فشل: " + e.getMessage();
-            }
-            final String shown = message;
-            ui.post(() -> {
-                if (isFinishing()) return;
-                Ui.toast(this, shown);
-                load();
-            });
-        });
-    }
-
-    private void speedDialog(final JSONObject device) {
-        final String mac = device.optString("mac");
-        final String origKey = "orig_" + profile.id + "_" + mac;
-        LinearLayout f = form();
-        f.addView(Ui.text(this, "الوحدة KB/s — كل 1 Mbps تقريباً 128 KB/s", 12, Ui.MUTED, false));
-        final EditText down = Ui.input(this, "حد التنزيل", InputType.TYPE_CLASS_NUMBER);
-        final EditText up = Ui.input(this, "حد الرفع", InputType.TYPE_CLASS_NUMBER);
-        down.setText(device.optString("limitDown", ""));
-        up.setText(device.optString("limitUp", ""));
-        f.addView(down);
-        f.addView(up);
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("تحديد السرعة")
-                .setView(f)
-                .setPositiveButton("تطبيق", (d, w) -> {
-                    final String dn = down.getText().toString().trim();
-                    final String u = up.getText().toString().trim();
-                    if (dn.isEmpty() || u.isEmpty()) {
-                        Ui.toast(this, "اكتب القيمتين");
-                        return;
-                    }
-                    // نحفظ القيم الأصلية أول مرة حتى يرجع «إلغاء التحديد» لنفس حالة الراوتر.
-                    if (!prefs.contains(origKey)) {
-                        prefs.edit().putString(origKey, device.optString("limitUp", "0") + ","
-                                + device.optString("limitDown", "0")).apply();
-                    }
-                    applyLimit(device, u, dn);
-                })
-                .setNegativeButton("إلغاء", null);
-        if (prefs.contains(origKey)) {
-            b.setNeutralButton("إلغاء التحديد", (d, w) -> {
-                String[] orig = prefs.getString(origKey, "0,0").split(",");
-                prefs.edit().remove(origKey).apply();
-                applyLimit(device, orig[0], orig.length > 1 ? orig[1] : "0");
-            });
-        }
-        b.show();
-    }
-
-    private void applyLimit(final JSONObject device, final String up, final String down) {
-        try {
-            device.put("limitUp", up);
-            device.put("limitDown", down);
-        } catch (Exception e) {
-            Ui.toast(this, "قيمة غير صالحة");
-            return;
-        }
-        final JSONArray snapshot = table;
-        run(() -> driver.setNetControl(snapshot));
-    }
-
-    private void parentDialog(final String mac, final String shown) {
-        status.setText("جاري قراءة إعدادات الرقابة…");
-        io.execute(() -> {
-            try {
-                final JSONObject cfg = driver.parentControl(mac);
-                ui.post(() -> showParentDialog(mac, shown, cfg));
-            } catch (final Exception e) {
-                ui.post(() -> {
-                    if (!isFinishing()) status.setText("تعذّرت قراءة الرقابة: " + e.getMessage());
-                });
-            }
-        });
-    }
-
-    private void showParentDialog(final String mac, String shown, final JSONObject cfg) {
-        if (isFinishing()) return;
-        status.setText("");
-        LinearLayout f = form();
-        final Switch enable = new Switch(this);
-        enable.setText("تفعيل الرقابة على هذا الجهاز");
-        enable.setTextColor(Ui.WHITE);
-        enable.setChecked("1".equals(cfg.optString("enable")));
-        f.addView(enable);
-        f.addView(Ui.text(this, "وقت السماح بالإنترنت (خارج هذا الوقت ينقطع النت عن الجهاز):", 12, Ui.MUTED, false),
-                Ui.top(this, 10));
-        final EditText time = Ui.input(this, "00:00-23:59", InputType.TYPE_CLASS_TEXT);
-        time.setText(cfg.optString("time", "00:00-23:59"));
-        f.addView(time);
-        final Switch urlEnable = new Switch(this);
-        urlEnable.setText("تفعيل قائمة المواقع");
-        urlEnable.setTextColor(Ui.WHITE);
-        urlEnable.setChecked("1".equals(cfg.optString("url_enable")));
-        f.addView(urlEnable, Ui.top(this, 10));
-        final EditText urls = Ui.input(this, "مواقع بينها فاصلة: tiktok,youtube", InputType.TYPE_CLASS_TEXT);
-        urls.setText(cfg.optString("urls", ""));
-        f.addView(urls);
-        f.addView(Ui.text(this, "نوع القائمة (حظر أو سماح) والأيام تبقى كما هي في الراوتر؛ غيّرها من لوحة الراوتر.",
-                12, Ui.MUTED, false), Ui.top(this, 8));
-        new AlertDialog.Builder(this)
-                .setTitle("الرقابة • " + shown)
-                .setView(f)
-                .setPositiveButton("تطبيق", (d, w) -> {
-                    String t = time.getText().toString().trim();
-                    if (!t.matches("\\d{2}:\\d{2}-\\d{2}:\\d{2}")) {
-                        Ui.toast(this, "صيغة الوقت: 08:00-22:00");
-                        return;
-                    }
-                    try {
-                        cfg.put("enable", enable.isChecked() ? "1" : "0");
-                        cfg.put("time", t);
-                        cfg.put("url_enable", urlEnable.isChecked() ? "1" : "0");
-                        cfg.put("urls", urls.getText().toString().trim());
-                    } catch (Exception e) {
-                        return;
-                    }
-                    run(() -> driver.setParentControl(mac, cfg));
-                })
-                .setNegativeButton("إلغاء", null)
-                .show();
-    }
-
-    private void renameDialog(final String mac, String shown) {
-        LinearLayout f = form();
-        final EditText name = Ui.input(this, "اسم الجهاز", InputType.TYPE_CLASS_TEXT);
-        name.setText(shown);
-        f.addView(name);
-        new AlertDialog.Builder(this)
-                .setTitle("تسمية الجهاز (تُحفظ على هاتفك فقط)")
-                .setView(f)
-                .setPositiveButton("حفظ", (d, w) -> {
-                    prefs.edit().putString("name_" + mac, name.getText().toString().trim()).apply();
-                    render(table);
-                })
-                .setNegativeButton("إلغاء", null)
-                .show();
-    }
-
-    private void confirmReboot() {
-        new AlertDialog.Builder(this)
-                .setTitle("إعادة تشغيل الراوتر؟")
-                .setMessage("سينقطع الإنترنت عن كل الأجهزة لمدة دقيقة تقريباً.")
-                .setPositiveButton("إعادة تشغيل", (d, w) -> io.execute(() -> {
-                    String m;
-                    try {
-                        driver.reboot();
-                        m = "تم إرسال أمر إعادة التشغيل";
-                    } catch (Exception e) {
-                        m = "فشل: " + e.getMessage();
-                    }
-                    final String shown = m;
-                    ui.post(() -> {
-                        if (!isFinishing()) status.setText(shown);
-                    });
-                }))
-                .setNegativeButton("إلغاء", null)
-                .show();
-    }
-
-    private LinearLayout form() {
-        LinearLayout f = Ui.column(this);
-        int p = Ui.dp(this, 20);
-        f.setPadding(p, Ui.dp(this, 8), p, 0);
-        f.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        return f;
     }
 
     @Override
